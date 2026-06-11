@@ -1,0 +1,22 @@
+{
+  "name": "restful-backup",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/web"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev -w packages/server\" \"npm run dev -w packages/web\"",
+    "dev:server": "npm run dev -w packages/server",
+    "dev:web": "npm run dev -w packages/web",
+    "build": "npm run build -w packages/shared && npm run build -w packages/server && npm run build -w packages/web",
+    "db:generate": "npm run db:generate -w packages/server",
+    "db:migrate": "npm run db:migrate -w packages/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.7.0"
+  }
+}
