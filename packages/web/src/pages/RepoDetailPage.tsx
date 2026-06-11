@@ -51,6 +51,14 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
     }
   }
 
+  async function handleRetry(taskId: string) {
+    try {
+      const result = await api.retryTask(taskId);
+      setActiveTaskId(result.taskId);
+      setTimeout(fetchTasks, 1000);
+    } catch { /* ignore */ }
+  }
+
   function handleTaskComplete() {
     fetchRepo();
     fetchTasks();
@@ -130,15 +138,37 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
         ) : (
           <div className="space-y-2">
             {tasks.slice(0, 10).map((task) => (
-              <div key={task.id} className="bg-gray-800 rounded p-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <TaskStatusBadge status={task.status} />
-                  <span className="text-white font-medium capitalize">{task.operation}</span>
+              <div key={task.id} className="bg-gray-800 rounded p-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <TaskStatusBadge status={task.status} />
+                    <span className="text-white font-medium capitalize">{task.operation}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-sm text-gray-400">
+                    {task.durationMs != null && <span>{(task.durationMs / 1000).toFixed(1)}s</span>}
+                    <span>{new Date(task.createdAt).toLocaleString()}</span>
+                    {(task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled') && (
+                      <button
+                        onClick={() => handleRetry(task.id)}
+                        disabled={!!activeTaskId}
+                        className="text-blue-400 hover:text-blue-300 disabled:opacity-50 font-medium"
+                      >
+                        Retry
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="flex items-center gap-4 text-sm text-gray-400">
-                  {task.durationMs && <span>{(task.durationMs / 1000).toFixed(1)}s</span>}
-                  <span>{new Date(task.createdAt).toLocaleString()}</span>
-                </div>
+                {task.errorMessage && (
+                  <div className="mt-2 text-red-400 text-xs bg-red-950/40 rounded px-2 py-1 font-mono">
+                    {task.errorMessage}
+                  </div>
+                )}
+                {task.status === 'running' && task.durationMs == null && (
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+                    <span className="text-blue-300 text-xs">Running...</span>
+                  </div>
+                )}
               </div>
             ))}
           </div>

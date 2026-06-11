@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { eq, and, desc } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
 import { db, schema } from '../db/connection.js';
-import { enqueueTask, cancelTask } from '../queue/task-queue.js';
+import { enqueueTask, cancelTask, retryTask } from '../queue/task-queue.js';
 import type { TaskOperation, Task, TriggerTaskInput } from '@restful-backup/shared';
 
 export function taskRoutes(app: FastifyInstance): void {
@@ -73,11 +73,35 @@ export function taskRoutes(app: FastifyInstance): void {
 
     if (!task) return reply.status(404).send({ error: 'Task not found' });
     if (task.status !== 'running' && task.status !== 'queued') {
-      return reply.status(400).send({ error: 'Task is not running' });
+      return reply.status(400).send({ error: 'Task is not running or queued' });
     }
 
     const cancelled = cancelTask(taskId);
     return { cancelled };
+  });
+
+  app.post<{ Params: { taskId: string } }>('/api/tasks/:taskId/retry', async (request, reply) => {
+    const { userId } = request.user as { userId: string };
+    const { taskId } = request.params;
+
+    const task = db.select().from(schema.tasks)
+      .where(and(eq(schema.tasks.id, taskId), eq(schema.tasks.userId, userId)))
+      .get();
+
+    if (!task) return reply.status(404).send({ error: 'Task not found' });
+    if (task.status !== 'failed' && task.status !== 'timeout' && task.status !== 'cancelled') {
+      return reply.status(400).send({ error: 'Only failed, timeout, or cancelled tasks can be retried' });
+    }
+
+    const newTaskId = nanoid();
+    try {
+      await retryTask(taskId, newTaskId);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message });
+    }
+
+    reply.status(202);
+    return { taskId: newTaskId, status: 'queued', retriedFrom: taskId };
   });
 }
 

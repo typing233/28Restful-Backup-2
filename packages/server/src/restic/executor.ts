@@ -24,9 +24,10 @@ export async function executeRestic(
   callbacks: ExecutionCallbacks,
   signal: AbortSignal,
 ): Promise<ExecutionResult> {
+  const { env: resticEnv, cleanup: envCleanup } = buildResticEnv(repoUrl, credentials);
   const env = {
     ...process.env,
-    ...buildResticEnv(repoUrl, credentials),
+    ...resticEnv,
   };
 
   const startTime = Date.now();
@@ -90,6 +91,7 @@ export async function executeRestic(
 
     proc.on('close', (code) => {
       cleanup();
+      envCleanup();
       if (stdoutRemainder.trim()) {
         stdoutBuf += stdoutRemainder + '\n';
         callbacks.onStdout(stdoutRemainder);
@@ -109,6 +111,7 @@ export async function executeRestic(
 
     proc.on('error', (err) => {
       cleanup();
+      envCleanup();
       stderrBuf += err.message + '\n';
       callbacks.onStderr(`Process error: ${err.message}`);
       resolve({

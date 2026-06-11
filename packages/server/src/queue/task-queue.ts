@@ -13,6 +13,7 @@ export const taskEvents = new EventEmitter();
 taskEvents.setMaxListeners(100);
 
 const runningTasks = new Map<string, AbortController>();
+const cancelledTasks = new Set<string>();
 
 export async function enqueueTask(
   taskId: string,
@@ -38,7 +39,34 @@ export function cancelTask(taskId: string): boolean {
     controller.abort();
     return true;
   }
-  return false;
+
+  // Task is still queued (waiting for mutex), mark it for cancellation
+  cancelledTasks.add(taskId);
+  db.update(schema.tasks)
+    .set({ status: 'cancelled', completedAt: new Date() })
+    .where(eq(schema.tasks.id, taskId))
+    .run();
+  taskEvents.emit('message', { type: 'task:cancelled', taskId } satisfies ServerMessage);
+  return true;
+}
+
+export async function retryTask(originalTaskId: string, newTaskId: string): Promise<void> {
+  const original = db.select().from(schema.tasks).where(eq(schema.tasks.id, originalTaskId)).get();
+  if (!original) throw new Error('Original task not found');
+  if (original.status !== 'failed' && original.status !== 'timeout' && original.status !== 'cancelled') {
+    throw new Error('Only failed, timeout, or cancelled tasks can be retried');
+  }
+
+  db.insert(schema.tasks).values({
+    id: newTaskId,
+    repoId: original.repoId,
+    userId: original.userId,
+    operation: original.operation,
+    status: 'queued',
+    createdAt: new Date(),
+  }).run();
+
+  await enqueueTask(newTaskId, original.repoId, original.userId, original.operation as TaskOperation);
 }
 
 async function processTask(
@@ -50,6 +78,12 @@ async function processTask(
   const mutex = getRepoMutex(repoId);
 
   await mutex.runExclusive(async () => {
+    // Check if task was cancelled while waiting in queue
+    if (cancelledTasks.has(taskId)) {
+      cancelledTasks.delete(taskId);
+      return;
+    }
+
     const repo = db.select().from(schema.repos).where(eq(schema.repos.id, repoId)).get();
     if (!repo) {
       db.update(schema.tasks)

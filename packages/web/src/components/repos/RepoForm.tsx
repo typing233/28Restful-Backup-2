@@ -16,6 +16,9 @@ export function RepoForm({ onCreated, onCancel }: Props) {
   const [awsKeyId, setAwsKeyId] = useState('');
   const [awsSecret, setAwsSecret] = useState('');
   const [awsRegion, setAwsRegion] = useState('');
+  const [sshAuthType, setSshAuthType] = useState<'key' | 'password'>('password');
+  const [sshKey, setSshKey] = useState('');
+  const [sshPassword, setSshPassword] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -48,6 +51,10 @@ export function RepoForm({ onCreated, onCancel }: Props) {
             awsAccessKeyId: awsKeyId || undefined,
             awsSecretAccessKey: awsSecret || undefined,
             awsDefaultRegion: awsRegion || undefined,
+          } : {}),
+          ...(backendType === 'sftp' ? {
+            sshKey: sshAuthType === 'key' ? sshKey || undefined : undefined,
+            sshPassword: sshAuthType === 'password' ? sshPassword || undefined : undefined,
           } : {}),
         },
       });
@@ -136,6 +143,45 @@ export function RepoForm({ onCreated, onCancel }: Props) {
               className="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:border-blue-500 outline-none"
             />
           </div>
+        </>
+      )}
+
+      {backendType === 'sftp' && (
+        <>
+          <div>
+            <label className="text-gray-300 text-sm block mb-1">SSH Authentication</label>
+            <select
+              value={sshAuthType}
+              onChange={(e) => setSshAuthType(e.target.value as 'key' | 'password')}
+              className="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:border-blue-500 outline-none"
+            >
+              <option value="password">SSH Password</option>
+              <option value="key">SSH Private Key</option>
+            </select>
+          </div>
+          {sshAuthType === 'password' ? (
+            <div>
+              <label className="text-gray-300 text-sm block mb-1">SSH Password</label>
+              <input
+                type="password"
+                value={sshPassword}
+                onChange={(e) => setSshPassword(e.target.value)}
+                placeholder="SSH login password"
+                className="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:border-blue-500 outline-none"
+              />
+            </div>
+          ) : (
+            <div>
+              <label className="text-gray-300 text-sm block mb-1">SSH Private Key</label>
+              <textarea
+                value={sshKey}
+                onChange={(e) => setSshKey(e.target.value)}
+                placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"}
+                rows={5}
+                className="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:border-blue-500 outline-none font-mono text-xs"
+              />
+            </div>
+          )}
         </>
       )}
 

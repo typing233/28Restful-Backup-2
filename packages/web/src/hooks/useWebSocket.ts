@@ -7,32 +7,37 @@ export function useWebSocket() {
   const [connected, setConnected] = useState(false);
   const listenersRef = useRef<Set<(msg: ServerMessage) => void>>(new Set());
   const token = useAuthStore((s) => s.token);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!token) return;
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-    wsRef.current = ws;
+    function connect() {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token!)}`);
+      wsRef.current = ws;
 
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => {
-      setConnected(false);
-      setTimeout(() => {
-        // trigger re-render to reconnect
-      }, 3000);
-    };
-    ws.onmessage = (event) => {
-      try {
-        const msg: ServerMessage = JSON.parse(event.data);
-        for (const listener of listenersRef.current) {
-          listener(msg);
-        }
-      } catch { /* ignore */ }
-    };
+      ws.onopen = () => setConnected(true);
+      ws.onclose = () => {
+        setConnected(false);
+        wsRef.current = null;
+        reconnectTimer.current = setTimeout(connect, 3000);
+      };
+      ws.onmessage = (event) => {
+        try {
+          const msg: ServerMessage = JSON.parse(event.data);
+          for (const listener of listenersRef.current) {
+            listener(msg);
+          }
+        } catch { /* ignore */ }
+      };
+    }
+
+    connect();
 
     return () => {
-      ws.close();
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      wsRef.current?.close();
       wsRef.current = null;
     };
   }, [token]);

@@ -66,4 +66,7 @@ export const api = {
 
   cancelTask: (taskId: string) =>
     request<any>(`/api/tasks/${taskId}/cancel`, { method: 'POST' }),
+
+  retryTask: (taskId: string) =>
+    request<{ taskId: string; status: string; retriedFrom: string }>(`/api/tasks/${taskId}/retry`, { method: 'POST' }),
 };
