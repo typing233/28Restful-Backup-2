@@ -1,5 +1,6 @@
 import type { RepoCredentials } from '@restful-backup/shared';
 import { writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomBytes } from 'node:crypto';
@@ -7,6 +8,19 @@ import { randomBytes } from 'node:crypto';
 export interface ResticEnvResult {
   env: Record<string, string>;
   cleanup: () => void;
+}
+
+let sshpassAvailable: boolean | null = null;
+
+function checkSshpass(): boolean {
+  if (sshpassAvailable !== null) return sshpassAvailable;
+  try {
+    execSync('which sshpass', { stdio: 'ignore' });
+    sshpassAvailable = true;
+  } catch {
+    sshpassAvailable = false;
+  }
+  return sshpassAvailable;
 }
 
 export function buildResticEnv(repoUrl: string, credentials: RepoCredentials): ResticEnvResult {
@@ -33,7 +47,6 @@ export function buildResticEnv(repoUrl: string, credentials: RepoCredentials): R
     env.B2_ACCOUNT_KEY = credentials.b2AccountKey;
   }
 
-  // SFTP: write SSH key to temp file, set RESTIC_SFTP_COMMAND
   if (credentials.sshKey) {
     const keyDir = join(tmpdir(), 'restful-backup-keys');
     mkdirSync(keyDir, { recursive: true });
@@ -44,7 +57,12 @@ export function buildResticEnv(repoUrl: string, credentials: RepoCredentials): R
       try { unlinkSync(keyFile); } catch { /* ignore */ }
     };
   } else if (credentials.sshPassword) {
-    // Use sshpass for password-based SFTP authentication
+    if (!checkSshpass()) {
+      throw new Error(
+        'SFTP password authentication requires "sshpass" but it is not installed. ' +
+        'Install it (e.g. "apt install sshpass") or use SSH key authentication instead.'
+      );
+    }
     env.RESTIC_SFTP_COMMAND = `sshpass -p '${credentials.sshPassword.replace(/'/g, "'\\''")}' ssh -o StrictHostKeyChecking=no -s sftp`;
   }
 

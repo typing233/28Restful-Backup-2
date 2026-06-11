@@ -1,7 +1,6 @@
 import { spawn } from 'node:child_process';
 import { config } from '../config.js';
-import type { RepoCredentials } from '@restful-backup/shared';
-import { buildResticEnv } from './env-builder.js';
+import type { ResticEnvResult } from './env-builder.js';
 import { ResticCommand } from './commands.js';
 
 export interface ExecutionCallbacks {
@@ -19,15 +18,13 @@ export interface ExecutionResult {
 
 export async function executeRestic(
   command: ResticCommand,
-  repoUrl: string,
-  credentials: RepoCredentials,
+  envResult: ResticEnvResult,
   callbacks: ExecutionCallbacks,
   signal: AbortSignal,
 ): Promise<ExecutionResult> {
-  const { env: resticEnv, cleanup: envCleanup } = buildResticEnv(repoUrl, credentials);
   const env = {
     ...process.env,
-    ...resticEnv,
+    ...envResult.env,
   };
 
   const startTime = Date.now();
@@ -91,7 +88,7 @@ export async function executeRestic(
 
     proc.on('close', (code) => {
       cleanup();
-      envCleanup();
+      envResult.cleanup();
       if (stdoutRemainder.trim()) {
         stdoutBuf += stdoutRemainder + '\n';
         callbacks.onStdout(stdoutRemainder);
@@ -111,7 +108,7 @@ export async function executeRestic(
 
     proc.on('error', (err) => {
       cleanup();
-      envCleanup();
+      envResult.cleanup();
       stderrBuf += err.message + '\n';
       callbacks.onStderr(`Process error: ${err.message}`);
       resolve({

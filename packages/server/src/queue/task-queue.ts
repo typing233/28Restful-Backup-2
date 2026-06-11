@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { decrypt } from '../crypto/credentials.js';
 import { buildCommand } from '../restic/commands.js';
 import { executeRestic } from '../restic/executor.js';
+import { buildResticEnv } from '../restic/env-builder.js';
 import { getRepoMutex } from './repo-lock.js';
 import type { ServerMessage } from '@restful-backup/shared';
 
@@ -84,6 +85,14 @@ async function processTask(
       return;
     }
 
+    // Re-check DB status in case cancel raced between set membership check and here
+    const taskRow = db.select({ status: schema.tasks.status }).from(schema.tasks)
+      .where(eq(schema.tasks.id, taskId)).get();
+    if (!taskRow || taskRow.status === 'cancelled') {
+      cancelledTasks.delete(taskId);
+      return;
+    }
+
     const repo = db.select().from(schema.repos).where(eq(schema.repos.id, repoId)).get();
     if (!repo) {
       db.update(schema.tasks)
@@ -96,6 +105,29 @@ async function processTask(
     const credentials: RepoCredentials = JSON.parse(
       decrypt(repo.credentialsEncrypted, repo.credentialsIv, repo.credentialsTag, config.encryptionSecret)
     );
+
+    // Validate environment setup (e.g. check sshpass availability for SFTP password auth)
+    let resticEnvResult: ReturnType<typeof buildResticEnv>;
+    try {
+      resticEnvResult = buildResticEnv(repo.repoUrl, credentials);
+    } catch (envErr: any) {
+      db.update(schema.tasks)
+        .set({ status: 'failed', errorMessage: envErr.message, completedAt: new Date() })
+        .where(eq(schema.tasks.id, taskId))
+        .run();
+      db.update(schema.repos)
+        .set({ status: 'error', errorMessage: envErr.message, updatedAt: new Date() })
+        .where(eq(schema.repos.id, repoId))
+        .run();
+      taskEvents.emit('message', {
+        type: 'task:failed',
+        taskId,
+        exitCode: 1,
+        error: envErr.message,
+        durationMs: 0,
+      } satisfies ServerMessage);
+      return;
+    }
 
     const controller = new AbortController();
     runningTasks.set(taskId, controller);
@@ -117,8 +149,7 @@ async function processTask(
 
     const result = await executeRestic(
       command,
-      repo.repoUrl,
-      credentials,
+      resticEnvResult,
       {
         onStdout: (line) => {
           logLines.push(line);

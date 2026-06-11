@@ -5,9 +5,11 @@ const BASE_URL = '';
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = useAuthStore.getState().token;
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
+  if (options.body) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   const res = await fetch(`${BASE_URL}${path}`, {
     ...options,

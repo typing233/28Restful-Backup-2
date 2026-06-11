@@ -1,12 +1,13 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import { TaskLogStream } from '../components/tasks/TaskLogStream';
 import { TaskStatusBadge } from '../components/tasks/TaskStatusBadge';
+import type { ServerMessage } from '@restful-backup/shared';
 
 interface Props {
   repoId: string;
   wsSend: (msg: any) => void;
-  wsSubscribe: (listener: any) => () => void;
+  wsSubscribe: (listener: (msg: ServerMessage) => void) => () => void;
   onBack: () => void;
 }
 
@@ -15,6 +16,7 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
   const [tasks, setTasks] = useState<any[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
+  const [taskProgress, setTaskProgress] = useState<Record<string, number>>({});
 
   const fetchRepo = async () => {
     try {
@@ -35,12 +37,35 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
     fetchTasks();
   }, [repoId]);
 
+  // Subscribe to repo-level events for progress updates on all tasks
+  useEffect(() => {
+    wsSend({ type: 'subscribe-repo', repoId });
+
+    const unsub = wsSubscribe((msg: ServerMessage) => {
+      if (msg.type === 'task:progress' && 'taskId' in msg) {
+        setTaskProgress((prev) => ({ ...prev, [msg.taskId]: msg.percent }));
+      }
+      if (msg.type === 'task:completed' || msg.type === 'task:failed' || msg.type === 'task:cancelled') {
+        fetchTasks();
+        fetchRepo();
+      }
+      if (msg.type === 'task:started' && 'taskId' in msg) {
+        fetchTasks();
+      }
+    });
+
+    return () => {
+      wsSend({ type: 'unsubscribe-repo', repoId });
+      unsub();
+    };
+  }, [repoId, wsSend, wsSubscribe]);
+
   async function handleTrigger(operation: string) {
     setTriggering(true);
     try {
       const { taskId } = await api.triggerTask(repoId, operation);
       setActiveTaskId(taskId);
-      setTimeout(fetchTasks, 1000);
+      setTimeout(fetchTasks, 500);
     } catch { /* ignore */ }
     setTriggering(false);
   }
@@ -55,7 +80,7 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
     try {
       const result = await api.retryTask(taskId);
       setActiveTaskId(result.taskId);
-      setTimeout(fetchTasks, 1000);
+      setTimeout(fetchTasks, 500);
     } catch { /* ignore */ }
   }
 
@@ -137,40 +162,52 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
           <p className="text-gray-500 text-sm">No tasks yet.</p>
         ) : (
           <div className="space-y-2">
-            {tasks.slice(0, 10).map((task) => (
-              <div key={task.id} className="bg-gray-800 rounded p-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <TaskStatusBadge status={task.status} />
-                    <span className="text-white font-medium capitalize">{task.operation}</span>
+            {tasks.slice(0, 10).map((task) => {
+              const progress = taskProgress[task.id];
+              const isRunning = task.status === 'running';
+
+              return (
+                <div key={task.id} className="bg-gray-800 rounded p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <TaskStatusBadge status={task.status} />
+                      <span className="text-white font-medium capitalize">{task.operation}</span>
+                      {isRunning && progress != null && (
+                        <span className="text-blue-300 text-xs font-mono">{progress.toFixed(1)}%</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-3 text-sm text-gray-400">
+                      {task.durationMs != null && <span>{(task.durationMs / 1000).toFixed(1)}s</span>}
+                      <span>{new Date(task.createdAt).toLocaleString()}</span>
+                      {(task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled') && (
+                        <button
+                          onClick={() => handleRetry(task.id)}
+                          disabled={!!activeTaskId}
+                          className="text-blue-400 hover:text-blue-300 disabled:opacity-50 font-medium"
+                        >
+                          Retry
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 text-sm text-gray-400">
-                    {task.durationMs != null && <span>{(task.durationMs / 1000).toFixed(1)}s</span>}
-                    <span>{new Date(task.createdAt).toLocaleString()}</span>
-                    {(task.status === 'failed' || task.status === 'timeout' || task.status === 'cancelled') && (
-                      <button
-                        onClick={() => handleRetry(task.id)}
-                        disabled={!!activeTaskId}
-                        className="text-blue-400 hover:text-blue-300 disabled:opacity-50 font-medium"
-                      >
-                        Retry
-                      </button>
-                    )}
-                  </div>
+                  {isRunning && (
+                    <div className="mt-2">
+                      <div className="h-1.5 bg-gray-700 rounded overflow-hidden">
+                        <div
+                          className="h-full bg-blue-500 transition-all duration-500"
+                          style={{ width: `${Math.min(progress ?? 0, 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {task.errorMessage && (
+                    <div className="mt-2 text-red-400 text-xs bg-red-950/40 rounded px-2 py-1 font-mono">
+                      {task.errorMessage}
+                    </div>
+                  )}
                 </div>
-                {task.errorMessage && (
-                  <div className="mt-2 text-red-400 text-xs bg-red-950/40 rounded px-2 py-1 font-mono">
-                    {task.errorMessage}
-                  </div>
-                )}
-                {task.status === 'running' && task.durationMs == null && (
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
-                    <span className="text-blue-300 text-xs">Running...</span>
-                  </div>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
