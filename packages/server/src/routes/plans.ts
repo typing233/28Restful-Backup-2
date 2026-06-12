@@ -51,6 +51,8 @@ export function planRoutes(app: FastifyInstance): void {
       maxBytes: body.maxBytes ?? null,
       oneFileSystem: body.oneFileSystem ?? false,
       excludeLargerThan: body.excludeLargerThan ?? null,
+      allowedHoursStart: body.allowedHoursStart ?? null,
+      allowedHoursEnd: body.allowedHoursEnd ?? null,
       allowedBasePaths: body.allowedBasePaths ? JSON.stringify(body.allowedBasePaths) : null,
       preHook: body.preHook ?? null,
       postHook: body.postHook ?? null,
@@ -97,6 +99,8 @@ export function planRoutes(app: FastifyInstance): void {
     if (body.maxBytes !== undefined) updates.maxBytes = body.maxBytes;
     if (body.oneFileSystem !== undefined) updates.oneFileSystem = body.oneFileSystem;
     if (body.excludeLargerThan !== undefined) updates.excludeLargerThan = body.excludeLargerThan;
+    if (body.allowedHoursStart !== undefined) updates.allowedHoursStart = body.allowedHoursStart;
+    if (body.allowedHoursEnd !== undefined) updates.allowedHoursEnd = body.allowedHoursEnd;
     if (body.allowedBasePaths !== undefined) updates.allowedBasePaths = body.allowedBasePaths ? JSON.stringify(body.allowedBasePaths) : null;
     if (body.enabled !== undefined) updates.enabled = body.enabled;
     if (body.preHook !== undefined) updates.preHook = body.preHook;
@@ -170,7 +174,7 @@ export function planRoutes(app: FastifyInstance): void {
     return toPlanResponse(updated);
   });
 
-  app.post<{ Params: { planId: string }; Body: { force?: boolean } }>('/api/plans/:planId/trigger', async (request, reply) => {
+  app.post<{ Params: { planId: string } }>('/api/plans/:planId/trigger', async (request, reply) => {
     const { userId } = request.user as { userId: string };
     const { planId } = request.params;
 
@@ -179,8 +183,7 @@ export function planRoutes(app: FastifyInstance): void {
       .get();
     if (!plan) return reply.status(404).send({ error: 'Plan not found' });
 
-    const force = request.body?.force ?? false;
-    const runId = await executePlanBackup(planId, { triggerType: 'manual', force });
+    const runId = await executePlanBackup(planId, 'manual');
     const run = db.select().from(schema.backupPlanRuns).where(eq(schema.backupPlanRuns.id, runId)).get()!;
 
     reply.status(202);
@@ -222,7 +225,9 @@ function toPlanResponse(row: typeof schema.backupPlans.$inferSelect): BackupPlan
     maxBytes: row.maxBytes,
     oneFileSystem: row.oneFileSystem,
     excludeLargerThan: row.excludeLargerThan,
-    allowedBasePaths: row.allowedBasePaths ? JSON.parse(row.allowedBasePaths) : null,
+    allowedHoursStart: row.allowedHoursStart,
+    allowedHoursEnd: row.allowedHoursEnd,
+    allowedBasePaths: row.allowedBasePaths ? JSON.parse(row.allowedBasePaths) : [],
     preHook: row.preHook,
     postHook: row.postHook,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,

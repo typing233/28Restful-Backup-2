@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import { mkdtempSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, rmdirSync, accessSync, symlinkSync, readlinkSync, constants as fsConstants } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, readdirSync, statSync, lstatSync, renameSync, copyFileSync, rmSync, accessSync, symlinkSync, readlinkSync, constants as fsConstants } from 'node:fs';
 import { join, dirname, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { db, schema } from '../db/connection.js';
@@ -16,11 +16,14 @@ export async function startRestore(
   const repo = db.select().from(schema.repos).where(eq(schema.repos.id, repoId)).get();
   if (!repo) throw new Error('Repository not found');
 
+  // --- Pre-restore verification ---
+  // Check target path is writable
   const targetDir = input.targetPath;
   try {
     if (existsSync(targetDir)) {
       accessSync(targetDir, fsConstants.W_OK);
     } else {
+      // Check parent is writable
       const parent = dirname(targetDir);
       if (!existsSync(parent)) {
         throw new Error(`Parent directory does not exist: ${parent}`);
@@ -31,6 +34,7 @@ export async function startRestore(
     throw new Error(`Target path not writable: ${err.message}`);
   }
 
+  // Check available disk space at target
   const diskError = checkDiskSpace(targetDir);
   if (diskError) {
     throw new Error(diskError);
@@ -40,6 +44,7 @@ export async function startRestore(
   const taskId = nanoid();
   const context = JSON.stringify({ restoreJobId: jobId });
 
+  // For rename/skip strategies, restore to temp dir first
   const needsTempDir = input.conflictStrategy !== 'overwrite';
   const tempDir = needsTempDir ? mkdtempSync(join(tmpdir(), 'restic-restore-')) : null;
   const effectiveTarget = tempDir || targetDir;
@@ -132,28 +137,31 @@ function handleRestoreCompleted(
     if (bytesMatch) bytesRestored = parseInt(bytesMatch[1], 10);
   }
 
+  // Apply conflict strategy if we used a temp dir
   if (tempDir) {
     try {
       const result = applyConflictStrategy(tempDir, finalTarget, conflictStrategy);
       filesRestored = result.copiedFiles;
       bytesRestored = result.copiedBytes;
     } catch (err: any) {
+      // Rollback: clean temp dir and mark failed
       cleanupTempDir(tempDir);
       db.update(schema.restoreJobs)
         .set({
           status: 'failed',
-          errorMessage: `Conflict resolution failed: ${err.message}. Target directory rolled back to pre-restore state.`,
+          errorMessage: `Conflict resolution failed: ${err.message}. Rolled back.`,
           durationMs: task?.durationMs ?? null,
           completedAt: new Date(),
         })
         .where(eq(schema.restoreJobs.id, jobId))
         .run();
-      taskEvents.emit('message', { type: 'restore:failed', jobId, error: `Conflict resolution failed: ${err.message}. Rolled back.` } satisfies ServerMessage);
+      taskEvents.emit('message', { type: 'restore:failed', jobId, error: `Conflict resolution failed: ${err.message}` } satisfies ServerMessage);
       return;
     }
     cleanupTempDir(tempDir);
   }
 
+  // Post-restore verification: check file counts match
   if (verifyAfter && filesRestored > 0) {
     const verifyError = verifyRestoredFiles(finalTarget, filesRestored);
     if (verifyError) {
@@ -200,6 +208,7 @@ function handleRestoreCompleted(
 }
 
 function handleRestoreFailed(jobId: string, error: string, durationMs: number, tempDir: string | null): void {
+  // Rollback: clean temp dir on failure
   cleanupTempDir(tempDir);
 
   db.update(schema.restoreJobs)
@@ -219,7 +228,7 @@ function handleRestoreFailed(jobId: string, error: string, durationMs: number, t
   } satisfies ServerMessage);
 }
 
-// --- Journal-based conflict strategy with true rollback ---
+// --- Conflict strategy implementation ---
 
 interface ConflictResult {
   copiedFiles: number;
@@ -228,40 +237,61 @@ interface ConflictResult {
   renamedFiles: number;
 }
 
-export type JournalEntry =
-  | { type: 'renamed'; originalPath: string; bakPath: string }
-  | { type: 'created'; path: string }
-  | { type: 'created_dir'; path: string };
+type MutationRecord = {
+  type: 'renamed';
+  originalPath: string;
+  bakPath: string;
+} | {
+  type: 'created';
+  path: string;
+} | {
+  type: 'overwritten';
+  path: string;
+  bakPath: string;
+}
 
-export function applyConflictStrategy(sourceDir: string, targetDir: string, strategy: ConflictStrategy): ConflictResult {
+function applyConflictStrategy(sourceDir: string, targetDir: string, strategy: ConflictStrategy): ConflictResult {
   const result: ConflictResult = { copiedFiles: 0, copiedBytes: 0, skippedFiles: 0, renamedFiles: 0 };
-  const journal: JournalEntry[] = [];
+  const mutations: MutationRecord[] = [];
 
   if (!existsSync(targetDir)) {
     mkdirSync(targetDir, { recursive: true });
-    journal.push({ type: 'created_dir', path: targetDir });
   }
 
   try {
-    walkAndCopy(sourceDir, sourceDir, targetDir, strategy, result, journal);
+    walkAndCopy(sourceDir, sourceDir, targetDir, strategy, result, mutations);
   } catch (err) {
-    rollbackJournal(journal);
+    // Rollback all mutations to restore target to pre-operation state
+    rollbackMutations(mutations);
     throw err;
   }
-
   return result;
 }
 
-export function rollbackJournal(journal: JournalEntry[]): void {
-  for (let i = journal.length - 1; i >= 0; i--) {
-    const entry = journal[i];
+function rollbackMutations(mutations: MutationRecord[]): void {
+  // Process in reverse order to undo operations
+  for (let i = mutations.length - 1; i >= 0; i--) {
+    const m = mutations[i];
     try {
-      if (entry.type === 'created') {
-        rmSync(entry.path, { force: true });
-      } else if (entry.type === 'renamed') {
-        renameSync(entry.bakPath, entry.originalPath);
-      } else if (entry.type === 'created_dir') {
-        try { rmdirSync(entry.path); } catch { /* non-empty or already removed */ }
+      if (m.type === 'created') {
+        // Delete the newly created file
+        if (existsSync(m.path)) {
+          rmSync(m.path, { force: true });
+        }
+      } else if (m.type === 'renamed') {
+        // Move .bak file back to its original location
+        if (existsSync(m.bakPath)) {
+          if (existsSync(m.originalPath)) {
+            rmSync(m.originalPath, { force: true });
+          }
+          renameSync(m.bakPath, m.originalPath);
+        }
+      } else if (m.type === 'overwritten') {
+        // Restore from backup
+        if (existsSync(m.bakPath)) {
+          rmSync(m.path, { force: true });
+          renameSync(m.bakPath, m.path);
+        }
       }
     } catch { /* best-effort rollback */ }
   }
@@ -273,7 +303,7 @@ function walkAndCopy(
   targetBase: string,
   strategy: ConflictStrategy,
   result: ConflictResult,
-  journal: JournalEntry[],
+  mutations: MutationRecord[],
 ): void {
   let entries;
   try {
@@ -293,9 +323,8 @@ function walkAndCopy(
     if (entry.isDirectory()) {
       if (!existsSync(targetPath)) {
         mkdirSync(targetPath, { recursive: true });
-        journal.push({ type: 'created_dir', path: targetPath });
       }
-      walkAndCopy(baseDir, sourcePath, targetBase, strategy, result, journal);
+      walkAndCopy(baseDir, sourcePath, targetBase, strategy, result, mutations);
     } else if (entry.isSymbolicLink()) {
       try {
         const linkTarget = readlinkSync(sourcePath);
@@ -309,28 +338,35 @@ function walkAndCopy(
           } else if (strategy === 'rename') {
             const bakTarget = findBakPath(targetPath);
             renameSync(targetPath, bakTarget);
-            journal.push({ type: 'renamed', originalPath: targetPath, bakPath: bakTarget });
+            mutations.push({ type: 'renamed', originalPath: targetPath, bakPath: bakTarget });
             result.renamedFiles++;
           } else {
-            rmSync(targetPath, { force: true });
+            // overwrite: backup existing first for rollback
+            const bakTarget = findBakPath(targetPath);
+            renameSync(targetPath, bakTarget);
+            mutations.push({ type: 'overwritten', path: targetPath, bakPath: bakTarget });
           }
         }
 
         const parentDir = dirname(targetPath);
         if (!existsSync(parentDir)) {
           mkdirSync(parentDir, { recursive: true });
-          journal.push({ type: 'created_dir', path: parentDir });
         }
 
         symlinkSync(linkTarget, targetPath);
-        journal.push({ type: 'created', path: targetPath });
+        if (!targetExists || strategy !== 'overwrite') {
+          mutations.push({ type: 'created', path: targetPath });
+        }
         result.copiedFiles++;
       } catch (err: any) {
-        if (err.code === 'EACCES' || err.code === 'EPERM') {
-          result.skippedFiles++;
-          continue;
+        if (err.code === 'ENOENT') {
+          const linkTarget = readlinkSync(sourcePath);
+          const parentDir = dirname(targetPath);
+          if (!existsSync(parentDir)) mkdirSync(parentDir, { recursive: true });
+          symlinkSync(linkTarget, targetPath);
+          mutations.push({ type: 'created', path: targetPath });
+          result.copiedFiles++;
         }
-        throw err;
       }
     } else if (entry.isFile()) {
       if (existsSync(targetPath)) {
@@ -340,21 +376,25 @@ function walkAndCopy(
         } else if (strategy === 'rename') {
           const bakTarget = findBakPath(targetPath);
           renameSync(targetPath, bakTarget);
-          journal.push({ type: 'renamed', originalPath: targetPath, bakPath: bakTarget });
+          mutations.push({ type: 'renamed', originalPath: targetPath, bakPath: bakTarget });
           result.renamedFiles++;
+        } else {
+          // overwrite: backup for rollback
+          const bakTarget = findBakPath(targetPath);
+          renameSync(targetPath, bakTarget);
+          mutations.push({ type: 'overwritten', path: targetPath, bakPath: bakTarget });
         }
       }
 
       const parentDir = dirname(targetPath);
       if (!existsSync(parentDir)) {
         mkdirSync(parentDir, { recursive: true });
-        journal.push({ type: 'created_dir', path: parentDir });
       }
 
       try {
         copyFileSync(sourcePath, targetPath);
-        journal.push({ type: 'created', path: targetPath });
         const stat = statSync(sourcePath);
+        mutations.push({ type: 'created', path: targetPath });
         result.copiedFiles++;
         result.copiedBytes += stat.size;
       } catch (err: any) {
@@ -387,6 +427,7 @@ function verifyRestoredFiles(targetDir: string, expectedCount: number): string |
   try {
     let actualCount = 0;
     countFilesRecursive(targetDir, (count) => { actualCount = count; });
+    // Allow some tolerance since restic may count differently
     if (actualCount === 0 && expectedCount > 0) {
       return `No files found in target directory after restore`;
     }
@@ -421,6 +462,7 @@ function checkDiskSpace(targetPath: string): string | null {
     const parts = output.trim().split(/\s+/);
     if (parts.length >= 4) {
       const available = parseInt(parts[3], 10);
+      // Require at least 100MB free
       if (available < 100 * 1024 * 1024) {
         return `Insufficient disk space: only ${(available / (1024 * 1024)).toFixed(0)} MB available at target`;
       }

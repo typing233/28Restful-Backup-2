@@ -67,6 +67,8 @@ sqlite.exec(`
     max_bytes INTEGER,
     one_file_system INTEGER NOT NULL DEFAULT 0,
     exclude_larger_than TEXT,
+    allowed_hours_start INTEGER,
+    allowed_hours_end INTEGER,
     allowed_base_paths TEXT,
     pre_hook TEXT,
     post_hook TEXT,
