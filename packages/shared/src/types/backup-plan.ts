@@ -24,6 +24,7 @@ export interface BackupPlan {
   maxBytes: number | null;
   oneFileSystem: boolean;
   excludeLargerThan: string | null;
+  allowedBasePaths: string[] | null;
   preHook: string | null;
   postHook: string | null;
   lastRunAt: string | null;
@@ -45,6 +46,7 @@ export interface CreateBackupPlanInput {
   maxBytes?: number;
   oneFileSystem?: boolean;
   excludeLargerThan?: string;
+  allowedBasePaths?: string[];
   preHook?: string;
   postHook?: string;
 }
@@ -60,6 +62,7 @@ export interface UpdateBackupPlanInput {
   maxBytes?: number | null;
   oneFileSystem?: boolean;
   excludeLargerThan?: string | null;
+  allowedBasePaths?: string[] | null;
   enabled?: boolean;
   preHook?: string | null;
   postHook?: string | null;

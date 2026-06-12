@@ -27,7 +27,7 @@ export function schedulePlan(planId: string, cronExpression: string): void {
       unschedulePlan(planId);
       return;
     }
-    executePlanBackup(planId, 'scheduled').catch((err) => {
+    executePlanBackup(planId, { triggerType: 'scheduled' }).catch((err) => {
       console.error(`Scheduled backup failed for plan ${planId}:`, err);
     });
   });

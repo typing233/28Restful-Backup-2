@@ -1,8 +1,9 @@
 import { eq } from 'drizzle-orm';
 import { nanoid } from 'nanoid';
-import { statSync, accessSync, constants as fsConstants } from 'node:fs';
+import { readdirSync, statSync, accessSync, constants as fsConstants } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { db, schema } from '../db/connection.js';
-import { enqueueTask, taskEvents } from '../queue/task-queue.js';
+import { enqueueTask, taskEvents, cancelTask } from '../queue/task-queue.js';
 import { buildBackupCommand, buildForgetCommand, buildCommand } from '../restic/commands.js';
 import { config } from '../config.js';
 import type { PlanRunTrigger, RetentionPolicy, ServerMessage } from '@restful-backup/shared';
@@ -30,29 +31,38 @@ function releaseBackupSlot(): void {
 // --- Idempotency: per-plan lock to prevent duplicate runs ---
 const runningPlans = new Set<string>();
 
-export async function executePlanBackup(planId: string, triggerType: PlanRunTrigger): Promise<string> {
-  // Idempotency guard: reject if plan already has a run in progress
+export interface ExecutePlanOptions {
+  triggerType: PlanRunTrigger;
+  force?: boolean;
+}
+
+export async function executePlanBackup(planId: string, opts: ExecutePlanOptions): Promise<string> {
   if (runningPlans.has(planId)) {
     throw new Error('Plan is already running. Wait for the current run to finish.');
   }
 
   const plan = db.select().from(schema.backupPlans).where(eq(schema.backupPlans.id, planId)).get();
   if (!plan) throw new Error('Plan not found');
-  if (!plan.enabled && triggerType === 'scheduled') throw new Error('Plan is disabled');
+  if (!plan.enabled && opts.triggerType === 'scheduled') throw new Error('Plan is disabled');
 
   const paths: string[] = JSON.parse(plan.paths);
   const excludes: string[] = plan.excludes ? JSON.parse(plan.excludes) : [];
   const tags: string[] = plan.tags ? JSON.parse(plan.tags) : [];
   const retentionPolicy: RetentionPolicy | null = plan.retentionPolicy ? JSON.parse(plan.retentionPolicy) : null;
+  const allowedBasePaths: string[] | null = plan.allowedBasePaths ? JSON.parse(plan.allowedBasePaths) : null;
 
-  // --- Pre-flight: Execution Window ---
+  // --- Pre-flight: Execution Window (blocks BOTH scheduled and manual unless force) ---
   const windowError = checkExecutionWindow(plan.cronExpression);
-  if (windowError && triggerType === 'scheduled') {
-    throw new Error(`Execution window check failed: ${windowError}`);
+  if (windowError) {
+    if (opts.force) {
+      console.warn(`[plan ${planId}] Execution window bypassed with force: ${windowError}`);
+    } else {
+      throw new Error(`Execution window: ${windowError}. Use force=true to override for manual triggers.`);
+    }
   }
 
-  // --- Pre-flight: Permission Boundary (path access) ---
-  const pathError = checkPathPermissions(paths);
+  // --- Pre-flight: Permission Boundary ---
+  const pathError = checkPathBoundary(paths, allowedBasePaths);
   if (pathError) {
     throw new Error(`Permission boundary: ${pathError}`);
   }
@@ -77,7 +87,7 @@ export async function executePlanBackup(planId: string, triggerType: PlanRunTrig
     id: runId,
     planId,
     taskId,
-    triggerType,
+    triggerType: opts.triggerType,
     status: 'queued',
     createdAt: new Date(),
   }).run();
@@ -107,11 +117,15 @@ export async function executePlanBackup(planId: string, triggerType: PlanRunTrig
     taskId,
   } satisfies ServerMessage);
 
+  // Runtime quota monitoring
+  const cleanupMonitor = monitorQuotaDuringBackup(taskId, plan.maxBytes, plan.maxFileCount);
+
   const completionHandler = (msg: ServerMessage) => {
     if (!('taskId' in msg) || msg.taskId !== taskId) return;
 
     if (msg.type === 'task:completed') {
       taskEvents.removeListener('message', completionHandler);
+      cleanupMonitor();
       handleBackupCompleted(planId, runId, taskId, retentionPolicy, plan.repoId, plan.userId).catch((err) => {
         console.error(`Post-backup handler failed for plan ${planId}:`, err);
       }).finally(() => {
@@ -120,11 +134,13 @@ export async function executePlanBackup(planId: string, triggerType: PlanRunTrig
       });
     } else if (msg.type === 'task:failed') {
       taskEvents.removeListener('message', completionHandler);
+      cleanupMonitor();
       handleBackupFailed(planId, runId, msg.error, msg.durationMs);
       runningPlans.delete(planId);
       releaseBackupSlot();
     } else if (msg.type === 'task:cancelled') {
       taskEvents.removeListener('message', completionHandler);
+      cleanupMonitor();
       db.update(schema.backupPlanRuns)
         .set({ status: 'cancelled', completedAt: new Date() })
         .where(eq(schema.backupPlanRuns.id, runId))
@@ -141,16 +157,14 @@ export async function executePlanBackup(planId: string, triggerType: PlanRunTrig
   return runId;
 }
 
-// --- Pre-flight check implementations ---
+// --- Pre-flight check implementations (exported for testing) ---
 
-function checkExecutionWindow(cronExpression: string): string | null {
-  // Parse hour range from cron: if expression specifies specific hours,
-  // ensure current hour falls within the allowed window
+export function checkExecutionWindow(cronExpression: string): string | null {
   const parts = cronExpression.split(' ');
   if (parts.length < 5) return null;
 
   const hourPart = parts[1];
-  if (hourPart === '*') return null; // anytime is fine
+  if (hourPart === '*') return null;
 
   const currentHour = new Date().getHours();
 
@@ -164,7 +178,6 @@ function checkExecutionWindow(cronExpression: string): string | null {
         return `Current hour ${currentHour} is outside execution window ${start}:00-${end}:59`;
       }
     } else {
-      // wrapping range like 22-4
       if (currentHour < start && currentHour > end) {
         return `Current hour ${currentHour} is outside execution window ${start}:00-${end}:59`;
       }
@@ -172,19 +185,26 @@ function checkExecutionWindow(cronExpression: string): string | null {
     return null;
   }
 
+  // Handle comma-separated hours like "2,14,22"
+  if (hourPart.includes(',')) {
+    const allowedHours = hourPart.split(',').map(h => parseInt(h, 10)).filter(h => !isNaN(h));
+    if (allowedHours.length > 0 && !allowedHours.includes(currentHour)) {
+      return `Current hour ${currentHour} is outside allowed hours [${allowedHours.join(', ')}]`;
+    }
+    return null;
+  }
+
   // Handle specific hour like "2"
   const specificHour = parseInt(hourPart, 10);
   if (!isNaN(specificHour) && currentHour !== specificHour) {
-    // Allow +-1 hour tolerance for scheduled runs
-    if (Math.abs(currentHour - specificHour) > 1) {
-      return `Current hour ${currentHour} is outside execution window (expected ~${specificHour}:00)`;
-    }
+    return `Current hour ${currentHour} is outside execution window (expected hour ${specificHour})`;
   }
 
   return null;
 }
 
-function checkPathPermissions(paths: string[]): string | null {
+export function checkPathBoundary(paths: string[], allowedBasePaths: string[] | null): string | null {
+  // Check OS read access
   for (const p of paths) {
     try {
       accessSync(p, fsConstants.R_OK);
@@ -192,12 +212,27 @@ function checkPathPermissions(paths: string[]): string | null {
       return `Cannot read path "${p}" — permission denied or path does not exist`;
     }
   }
+
+  // Enforce allowlist boundary if configured
+  if (!allowedBasePaths || allowedBasePaths.length === 0) return null;
+
+  for (const p of paths) {
+    const resolved = resolve(p);
+    const withinBoundary = allowedBasePaths.some(base => {
+      const resolvedBase = resolve(base);
+      return resolved === resolvedBase || resolved.startsWith(resolvedBase + '/');
+    });
+    if (!withinBoundary) {
+      return `Path "${p}" is outside allowed boundaries: [${allowedBasePaths.join(', ')}]`;
+    }
+  }
   return null;
 }
 
-function checkStorageQuota(paths: string[], maxBytes: number | null, maxFileCount: number | null): string | null {
+export function checkStorageQuota(paths: string[], maxBytes: number | null, maxFileCount: number | null): string | null {
   let totalSize = 0;
   let totalFiles = 0;
+  let anyPartial = false;
 
   for (const p of paths) {
     try {
@@ -206,56 +241,99 @@ function checkStorageQuota(paths: string[], maxBytes: number | null, maxFileCoun
         totalSize += stat.size;
         totalFiles += 1;
       } else if (stat.isDirectory()) {
-        // For directories, estimate from stat — full recursive scan is too expensive for pre-flight.
-        // We rely on restic's progress output to detect overrun during execution.
-        // But we can at least check the directory is accessible.
-        const estimate = estimateDirectorySize(p);
-        totalSize += estimate.bytes;
-        totalFiles += estimate.files;
+        const measured = measureDirectorySize(p);
+        totalSize += measured.bytes;
+        totalFiles += measured.files;
+        if (measured.partial) anyPartial = true;
       }
     } catch {
-      // Skip inaccessible paths (caught by permission check above)
+      // Skip inaccessible paths
     }
   }
 
   if (maxBytes && totalSize > maxBytes) {
-    return `Estimated size ${formatBytes(totalSize)} exceeds quota of ${formatBytes(maxBytes)}`;
+    return `Measured size ${formatBytes(totalSize)} exceeds quota of ${formatBytes(maxBytes)}`;
   }
   if (maxFileCount && totalFiles > maxFileCount) {
-    return `Estimated file count ${totalFiles} exceeds limit of ${maxFileCount}`;
+    return `Measured file count ${totalFiles} exceeds limit of ${maxFileCount}`;
   }
+
+  // If scan was partial and values are within limits, we can't prove over-quota.
+  // Runtime monitoring will catch it during execution.
+  if (anyPartial && (maxBytes || maxFileCount)) {
+    console.warn(`Storage quota pre-flight: scan was partial (large directory). Runtime monitoring will enforce quota.`);
+  }
+
   return null;
 }
 
-function estimateDirectorySize(dirPath: string): { bytes: number; files: number } {
-  try {
-    const { readdirSync, statSync: statS, lstatSync: lstatS } = require('node:fs');
-    const entries = readdirSync(dirPath, { withFileTypes: true });
-    let bytes = 0;
-    let files = 0;
-    for (const entry of entries.slice(0, 1000)) {
+export function measureDirectorySize(dirPath: string): { bytes: number; files: number; partial: boolean } {
+  const MAX_FILES = 100_000;
+  const TIMEOUT_MS = 10_000;
+  const startTime = Date.now();
+  let bytes = 0;
+  let files = 0;
+  let partial = false;
+
+  function walk(dir: string): void {
+    if (partial || files >= MAX_FILES) { partial = true; return; }
+    if (Date.now() - startTime > TIMEOUT_MS) { partial = true; return; }
+
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      if (partial || files >= MAX_FILES) { partial = true; return; }
+      if (Date.now() - startTime > TIMEOUT_MS) { partial = true; return; }
+
+      const fullPath = join(dir, entry.name);
       try {
-        const fullPath = `${dirPath}/${entry.name}`;
         if (entry.isSymbolicLink()) {
-          // Count symlinks as files but don't follow for size
           files++;
         } else if (entry.isFile()) {
-          bytes += statS(fullPath).size;
+          bytes += statSync(fullPath).size;
           files++;
         } else if (entry.isDirectory()) {
-          files += 10;
+          walk(fullPath);
         }
-      } catch { /* skip inaccessible entries (EACCES, ENOENT for broken symlinks) */ }
+      } catch { /* skip inaccessible entries */ }
     }
-    if (entries.length > 1000) {
-      const ratio = entries.length / 1000;
-      bytes = Math.round(bytes * ratio);
-      files = Math.round(files * ratio);
-    }
-    return { bytes, files };
-  } catch {
-    return { bytes: 0, files: 0 };
   }
+
+  walk(dirPath);
+  return { bytes, files, partial };
+}
+
+// --- Runtime quota monitoring ---
+
+function monitorQuotaDuringBackup(taskId: string, maxBytes: number | null, maxFileCount: number | null): () => void {
+  if (!maxBytes && !maxFileCount) return () => {};
+
+  const handler = (msg: ServerMessage) => {
+    if (msg.type !== 'task:log' || !('taskId' in msg) || msg.taskId !== taskId) return;
+    if (!('line' in msg)) return;
+
+    try {
+      const json = JSON.parse(msg.line);
+      if (json.message_type === 'status') {
+        if (maxBytes && json.bytes_done > maxBytes) {
+          console.warn(`[quota] Task ${taskId}: bytes_done ${json.bytes_done} exceeds quota ${maxBytes}. Cancelling.`);
+          cancelTask(taskId);
+        }
+        if (maxFileCount && json.files_done > maxFileCount) {
+          console.warn(`[quota] Task ${taskId}: files_done ${json.files_done} exceeds limit ${maxFileCount}. Cancelling.`);
+          cancelTask(taskId);
+        }
+      }
+    } catch { /* not JSON */ }
+  };
+
+  taskEvents.on('message', handler);
+  return () => taskEvents.removeListener('message', handler);
 }
 
 // --- Post-backup handlers ---
@@ -322,10 +400,8 @@ async function handleBackupCompleted(
 
   updatePlanLastRun(planId, 'completed');
 
-  // --- Post-backup verification: run `restic check` ---
   await runPostBackupVerification(repoId, userId, planId, runId);
 
-  // --- Apply retention policy if configured ---
   if (retentionPolicy && hasRetentionRules(retentionPolicy)) {
     await applyRetention(planId, runId, repoId, userId, retentionPolicy);
   }
@@ -352,7 +428,6 @@ async function runPostBackupVerification(repoId: string, userId: string, planId:
       if (msg.type === 'task:completed' || msg.type === 'task:failed' || msg.type === 'task:cancelled') {
         taskEvents.removeListener('message', handler);
         if (msg.type === 'task:failed') {
-          // Mark run with verification warning (don't fail the whole run)
           const existingRun = db.select().from(schema.backupPlanRuns).where(eq(schema.backupPlanRuns.id, runId)).get();
           const prevError = existingRun?.errorMessage || '';
           db.update(schema.backupPlanRuns)
@@ -434,9 +509,7 @@ function handleBackupFailed(planId: string, runId: string, error: string, durati
 
   updatePlanLastRun(planId, 'failed');
 
-  // Auto-retry with idempotency: only retry recoverable errors
   if (errorCategory === 'permission_denied' || errorCategory === 'disk_full') {
-    // Don't retry non-recoverable errors
     return;
   }
 
@@ -450,7 +523,7 @@ function handleBackupFailed(planId: string, runId: string, error: string, durati
   if (recentFailures < config.maxRetries) {
     const retryDelay = Math.pow(2, recentFailures) * 30_000;
     setTimeout(() => {
-      executePlanBackup(planId, 'scheduled').catch(() => {});
+      executePlanBackup(planId, { triggerType: 'scheduled' }).catch(() => {});
     }, retryDelay);
   }
 }
