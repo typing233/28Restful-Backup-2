@@ -55,6 +55,8 @@ export const backupPlans = sqliteTable('backup_plans', {
   retentionPolicy: text('retention_policy'),
   maxFileCount: integer('max_file_count'),
   maxBytes: integer('max_bytes'),
+  oneFileSystem: integer('one_file_system', { mode: 'boolean' }).notNull().default(false),
+  excludeLargerThan: text('exclude_larger_than'),
   preHook: text('pre_hook'),
   postHook: text('post_hook'),
   lastRunAt: integer('last_run_at', { mode: 'timestamp_ms' }),

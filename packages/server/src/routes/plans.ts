@@ -49,6 +49,8 @@ export function planRoutes(app: FastifyInstance): void {
       retentionPolicy: body.retentionPolicy ? JSON.stringify(body.retentionPolicy) : null,
       maxFileCount: body.maxFileCount ?? null,
       maxBytes: body.maxBytes ?? null,
+      oneFileSystem: body.oneFileSystem ?? false,
+      excludeLargerThan: body.excludeLargerThan ?? null,
       preHook: body.preHook ?? null,
       postHook: body.postHook ?? null,
       createdAt: now,
@@ -92,6 +94,8 @@ export function planRoutes(app: FastifyInstance): void {
     if (body.retentionPolicy !== undefined) updates.retentionPolicy = body.retentionPolicy ? JSON.stringify(body.retentionPolicy) : null;
     if (body.maxFileCount !== undefined) updates.maxFileCount = body.maxFileCount;
     if (body.maxBytes !== undefined) updates.maxBytes = body.maxBytes;
+    if (body.oneFileSystem !== undefined) updates.oneFileSystem = body.oneFileSystem;
+    if (body.excludeLargerThan !== undefined) updates.excludeLargerThan = body.excludeLargerThan;
     if (body.enabled !== undefined) updates.enabled = body.enabled;
     if (body.preHook !== undefined) updates.preHook = body.preHook;
     if (body.postHook !== undefined) updates.postHook = body.postHook;
@@ -213,6 +217,8 @@ function toPlanResponse(row: typeof schema.backupPlans.$inferSelect): BackupPlan
     retentionPolicy: row.retentionPolicy ? JSON.parse(row.retentionPolicy) : null,
     maxFileCount: row.maxFileCount,
     maxBytes: row.maxBytes,
+    oneFileSystem: row.oneFileSystem,
+    excludeLargerThan: row.excludeLargerThan,
     preHook: row.preHook,
     postHook: row.postHook,
     lastRunAt: row.lastRunAt?.toISOString() ?? null,

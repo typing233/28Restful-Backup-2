@@ -12,6 +12,8 @@ interface PlanFormData {
   retentionPolicy: any | null;
   maxFileCount: number | null;
   maxBytes: number | null;
+  oneFileSystem: boolean;
+  excludeLargerThan: string;
 }
 
 interface Props {
@@ -31,6 +33,8 @@ export function PlanForm({ initial, onSubmit, onCancel, submitLabel = 'Create Pl
     retentionPolicy: initial?.retentionPolicy || null,
     maxFileCount: initial?.maxFileCount ?? null,
     maxBytes: initial?.maxBytes ?? null,
+    oneFileSystem: initial?.oneFileSystem ?? false,
+    excludeLargerThan: initial?.excludeLargerThan || '',
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -113,6 +117,29 @@ export function PlanForm({ initial, onSubmit, onCancel, submitLabel = 'Create Pl
             value={form.maxBytes ?? ''}
             onChange={(e) => setForm({ ...form, maxBytes: e.target.value ? parseInt(e.target.value) : null })}
             placeholder="Unlimited"
+            className="w-full bg-gray-700 text-white px-3 py-2 rounded text-sm mt-1"
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id="oneFileSystem"
+            checked={form.oneFileSystem}
+            onChange={(e) => setForm({ ...form, oneFileSystem: e.target.checked })}
+            className="rounded bg-gray-700 border-gray-600"
+          />
+          <label htmlFor="oneFileSystem" className="text-sm text-gray-400">Stay on one filesystem</label>
+        </div>
+        <div>
+          <label className="text-sm text-gray-400">Exclude files larger than</label>
+          <input
+            type="text"
+            value={form.excludeLargerThan}
+            onChange={(e) => setForm({ ...form, excludeLargerThan: e.target.value })}
+            placeholder="e.g. 500M, 2G"
             className="w-full bg-gray-700 text-white px-3 py-2 rounded text-sm mt-1"
           />
         </div>

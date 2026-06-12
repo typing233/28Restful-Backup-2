@@ -65,6 +65,8 @@ sqlite.exec(`
     retention_policy TEXT,
     max_file_count INTEGER,
     max_bytes INTEGER,
+    one_file_system INTEGER NOT NULL DEFAULT 0,
+    exclude_larger_than TEXT,
     pre_hook TEXT,
     post_hook TEXT,
     last_run_at INTEGER,

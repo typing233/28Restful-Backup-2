@@ -22,6 +22,8 @@ export interface BackupPlan {
   retentionPolicy: RetentionPolicy | null;
   maxFileCount: number | null;
   maxBytes: number | null;
+  oneFileSystem: boolean;
+  excludeLargerThan: string | null;
   preHook: string | null;
   postHook: string | null;
   lastRunAt: string | null;
@@ -41,6 +43,8 @@ export interface CreateBackupPlanInput {
   retentionPolicy?: RetentionPolicy;
   maxFileCount?: number;
   maxBytes?: number;
+  oneFileSystem?: boolean;
+  excludeLargerThan?: string;
   preHook?: string;
   postHook?: string;
 }
@@ -54,6 +58,8 @@ export interface UpdateBackupPlanInput {
   retentionPolicy?: RetentionPolicy | null;
   maxFileCount?: number | null;
   maxBytes?: number | null;
+  oneFileSystem?: boolean;
+  excludeLargerThan?: string | null;
   enabled?: boolean;
   preHook?: string | null;
   postHook?: string | null;

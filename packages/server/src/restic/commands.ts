@@ -40,12 +40,16 @@ export interface BackupCommandOptions {
   paths: string[];
   excludes?: string[];
   tags?: string[];
+  oneFileSystem?: boolean;
+  excludeLargerThan?: string;
 }
 
 export function buildBackupCommand(opts: BackupCommandOptions): ResticCommand {
   const args = ['backup', '--json', ...opts.paths];
   for (const ex of opts.excludes ?? []) args.push('--exclude', ex);
   for (const tag of opts.tags ?? []) args.push('--tag', tag);
+  if (opts.oneFileSystem) args.push('--one-file-system');
+  if (opts.excludeLargerThan) args.push('--exclude-larger-than', opts.excludeLargerThan);
   return { args, timeoutMs: TIMEOUTS.backup, parseJson: true };
 }
 
