@@ -71,4 +71,58 @@ export const api = {
 
   retryTask: (taskId: string) =>
     request<{ taskId: string; status: string; retriedFrom: string }>(`/api/tasks/${taskId}/retry`, { method: 'POST' }),
+
+  // Backup Plans
+  getPlans: (repoId: string) =>
+    request<any[]>(`/api/repos/${repoId}/plans`),
+
+  createPlan: (repoId: string, data: any) =>
+    request<any>(`/api/repos/${repoId}/plans`, { method: 'POST', body: JSON.stringify(data) }),
+
+  getPlan: (planId: string) =>
+    request<any>(`/api/plans/${planId}`),
+
+  updatePlan: (planId: string, data: any) =>
+    request<any>(`/api/plans/${planId}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  deletePlan: (planId: string) =>
+    request<any>(`/api/plans/${planId}`, { method: 'DELETE' }),
+
+  pausePlan: (planId: string) =>
+    request<any>(`/api/plans/${planId}/pause`, { method: 'POST' }),
+
+  resumePlan: (planId: string) =>
+    request<any>(`/api/plans/${planId}/resume`, { method: 'POST' }),
+
+  triggerPlan: (planId: string) =>
+    request<{ runId: string; taskId: string; status: string }>(`/api/plans/${planId}/trigger`, { method: 'POST' }),
+
+  getPlanRuns: (planId: string) =>
+    request<any[]>(`/api/plans/${planId}/runs`),
+
+  // Snapshots
+  listSnapshots: (repoId: string) =>
+    request<any[]>(`/api/repos/${repoId}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ operation: 'snapshots' }),
+    }),
+
+  browseSnapshot: (repoId: string, snapshotId: string, path?: string) =>
+    request<any[]>(`/api/repos/${repoId}/snapshots/${snapshotId}/ls?path=${encodeURIComponent(path || '/')}`),
+
+  diffSnapshots: (repoId: string, snapshotId: string, compareWith: string) =>
+    request<any[]>(`/api/repos/${repoId}/snapshots/${snapshotId}/diff?compareWith=${encodeURIComponent(compareWith)}`),
+
+  // Restore
+  startRestore: (repoId: string, data: any) =>
+    request<{ jobId: string; taskId: string }>(`/api/repos/${repoId}/restore`, { method: 'POST', body: JSON.stringify(data) }),
+
+  getRestoreJobs: (repoId: string) =>
+    request<any[]>(`/api/repos/${repoId}/restore-jobs`),
+
+  getRestoreJob: (jobId: string) =>
+    request<any>(`/api/restore-jobs/${jobId}`),
+
+  cancelRestore: (jobId: string) =>
+    request<any>(`/api/restore-jobs/${jobId}/cancel`, { method: 'POST' }),
 };

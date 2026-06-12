@@ -11,7 +11,7 @@ export function taskRoutes(app: FastifyInstance): void {
     const { id: repoId } = request.params;
     const { operation } = request.body;
 
-    const validOps: TaskOperation[] = ['init', 'check', 'snapshots', 'stats', 'unlock'];
+    const validOps: TaskOperation[] = ['init', 'check', 'snapshots', 'stats', 'unlock', 'backup'];
     if (!validOps.includes(operation)) {
       return reply.status(400).send({ error: `Invalid operation. Must be one of: ${validOps.join(', ')}` });
     }

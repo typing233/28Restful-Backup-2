@@ -4,7 +4,7 @@ import type { TaskOperation, RepoCredentials } from '@restful-backup/shared';
 import { db, schema } from '../db/connection.js';
 import { config } from '../config.js';
 import { decrypt } from '../crypto/credentials.js';
-import { buildCommand } from '../restic/commands.js';
+import { buildCommand, type ResticCommand } from '../restic/commands.js';
 import { executeRestic } from '../restic/executor.js';
 import { buildResticEnv } from '../restic/env-builder.js';
 import { getRepoMutex } from './repo-lock.js';
@@ -21,7 +21,16 @@ export async function enqueueTask(
   repoId: string,
   userId: string,
   operation: TaskOperation,
+  commandOverride?: ResticCommand,
+  context?: string,
 ): Promise<void> {
+  if (context) {
+    db.update(schema.tasks)
+      .set({ context })
+      .where(eq(schema.tasks.id, taskId))
+      .run();
+  }
+
   taskEvents.emit('message', {
     type: 'task:queued',
     taskId,
@@ -29,7 +38,7 @@ export async function enqueueTask(
     operation,
   } satisfies ServerMessage);
 
-  processTask(taskId, repoId, userId, operation).catch((err) => {
+  processTask(taskId, repoId, userId, operation, commandOverride, context).catch((err) => {
     console.error(`Task ${taskId} failed unexpectedly:`, err);
   });
 }
@@ -41,7 +50,6 @@ export function cancelTask(taskId: string): boolean {
     return true;
   }
 
-  // Task is still queued (waiting for mutex), mark it for cancellation
   cancelledTasks.add(taskId);
   db.update(schema.tasks)
     .set({ status: 'cancelled', completedAt: new Date() })
@@ -64,10 +72,11 @@ export async function retryTask(originalTaskId: string, newTaskId: string): Prom
     userId: original.userId,
     operation: original.operation,
     status: 'queued',
+    context: original.context,
     createdAt: new Date(),
   }).run();
 
-  await enqueueTask(newTaskId, original.repoId, original.userId, original.operation as TaskOperation);
+  await enqueueTask(newTaskId, original.repoId, original.userId, original.operation as TaskOperation, undefined, original.context ?? undefined);
 }
 
 async function processTask(
@@ -75,17 +84,17 @@ async function processTask(
   repoId: string,
   userId: string,
   operation: TaskOperation,
+  commandOverride?: ResticCommand,
+  context?: string,
 ): Promise<void> {
   const mutex = getRepoMutex(repoId);
 
   await mutex.runExclusive(async () => {
-    // Check if task was cancelled while waiting in queue
     if (cancelledTasks.has(taskId)) {
       cancelledTasks.delete(taskId);
       return;
     }
 
-    // Re-check DB status in case cancel raced between set membership check and here
     const taskRow = db.select({ status: schema.tasks.status }).from(schema.tasks)
       .where(eq(schema.tasks.id, taskId)).get();
     if (!taskRow || taskRow.status === 'cancelled') {
@@ -106,7 +115,6 @@ async function processTask(
       decrypt(repo.credentialsEncrypted, repo.credentialsIv, repo.credentialsTag, config.encryptionSecret)
     );
 
-    // Validate environment setup (e.g. check sshpass availability for SFTP password auth)
     let resticEnvResult: ReturnType<typeof buildResticEnv>;
     try {
       resticEnvResult = buildResticEnv(repo.repoUrl, credentials);
@@ -144,7 +152,7 @@ async function processTask(
       startedAt: startedAt.toISOString(),
     } satisfies ServerMessage);
 
-    const command = buildCommand(operation);
+    const command = commandOverride ?? buildCommand(operation);
     const logLines: string[] = [];
 
     const result = await executeRestic(
@@ -304,6 +312,23 @@ function updateRepoStats(repoId: string, operation: TaskOperation, resultJson: s
 }
 
 function parseProgress(taskId: string, line: string): void {
+  // Handle restic JSON progress format: {"message_type":"status","percent_done":0.5,...}
+  if (line.startsWith('{')) {
+    try {
+      const json = JSON.parse(line);
+      if (json.message_type === 'status' && json.percent_done != null) {
+        taskEvents.emit('message', {
+          type: 'task:progress',
+          taskId,
+          percent: Math.round(json.percent_done * 1000) / 10,
+          message: json.current_files?.join(', ') || undefined,
+        } satisfies ServerMessage);
+        return;
+      }
+    } catch { /* not JSON, fall through */ }
+  }
+
+  // Legacy percentage format: [HH:MM:SS] XX.X%
   const match = line.match(/\[[\d:]+\]\s+([\d.]+)%/);
   if (match) {
     taskEvents.emit('message', {

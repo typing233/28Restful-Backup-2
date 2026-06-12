@@ -8,4 +8,5 @@ export const config = {
   databasePath: process.env.DATABASE_PATH || './data/restful-backup.db',
   resticBinary: process.env.RESTIC_BINARY || 'restic',
   maxConcurrentTasks: parseInt(process.env.MAX_CONCURRENT_TASKS || '4', 10),
+  maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
 };

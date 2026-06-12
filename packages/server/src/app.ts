@@ -7,6 +7,9 @@ import { healthRoutes } from './routes/health.js';
 import { userRoutes } from './routes/users.js';
 import { repoRoutes } from './routes/repos.js';
 import { taskRoutes } from './routes/tasks.js';
+import { planRoutes } from './routes/plans.js';
+import { snapshotRoutes } from './routes/snapshots.js';
+import { restoreRoutes } from './routes/restore.js';
 import { registerWebSocket } from './ws/handler.js';
 
 declare module 'fastify' {
@@ -50,6 +53,9 @@ export async function buildApp() {
     scoped.addHook('preHandler', app.authenticate);
     repoRoutes(scoped);
     taskRoutes(scoped);
+    planRoutes(scoped);
+    snapshotRoutes(scoped);
+    restoreRoutes(scoped);
   });
   registerWebSocket(app);
 

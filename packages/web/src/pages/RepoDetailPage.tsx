@@ -2,6 +2,9 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import { TaskLogStream } from '../components/tasks/TaskLogStream';
 import { TaskStatusBadge } from '../components/tasks/TaskStatusBadge';
+import { PlanListPage } from './PlanListPage';
+import { PlanDetailPage } from './PlanDetailPage';
+import { RestoreWizardPage } from './RestoreWizardPage';
 import type { ServerMessage } from '@restful-backup/shared';
 
 interface Props {
@@ -17,6 +20,8 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [triggering, setTriggering] = useState(false);
   const [taskProgress, setTaskProgress] = useState<Record<string, number>>({});
+  const [activeTab, setActiveTab] = useState<'tasks' | 'plans' | 'restore'>('tasks');
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
 
   const fetchRepo = async () => {
     try {
@@ -156,8 +161,29 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
         />
       )}
 
-      <div className="mt-6">
-        <h2 className="text-lg font-semibold text-white mb-3">Recent Tasks</h2>
+      {/* Tab Navigation */}
+      <div className="border-b border-gray-700 mb-6 mt-4">
+        <div className="flex gap-4">
+          {(['tasks', 'plans', 'restore'] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => { setActiveTab(tab); setSelectedPlanId(null); }}
+              className={`pb-2 px-1 text-sm font-medium border-b-2 capitalize ${
+                activeTab === tab
+                  ? 'border-blue-500 text-blue-400'
+                  : 'border-transparent text-gray-400 hover:text-white'
+              }`}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tab Content */}
+      {activeTab === 'tasks' && (
+        <div>
+          <h2 className="text-lg font-semibold text-white mb-3">Recent Tasks</h2>
         {tasks.length === 0 ? (
           <p className="text-gray-500 text-sm">No tasks yet.</p>
         ) : (
@@ -211,6 +237,19 @@ export function RepoDetailPage({ repoId, wsSend, wsSubscribe, onBack }: Props) {
           </div>
         )}
       </div>
+      )}
+
+      {activeTab === 'plans' && (
+        selectedPlanId ? (
+          <PlanDetailPage planId={selectedPlanId} onBack={() => setSelectedPlanId(null)} />
+        ) : (
+          <PlanListPage repoId={repoId} onSelectPlan={setSelectedPlanId} />
+        )
+      )}
+
+      {activeTab === 'restore' && (
+        <RestoreWizardPage repoId={repoId} wsSend={wsSend} wsSubscribe={wsSubscribe} onBack={() => setActiveTab('tasks')} />
+      )}
     </div>
   );
 }

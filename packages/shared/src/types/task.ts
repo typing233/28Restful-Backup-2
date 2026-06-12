@@ -1,4 +1,4 @@
-export type TaskOperation = 'init' | 'check' | 'snapshots' | 'stats' | 'unlock';
+export type TaskOperation = 'init' | 'check' | 'snapshots' | 'stats' | 'unlock' | 'backup' | 'forget' | 'restore' | 'ls' | 'diff';
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'timeout';
 
